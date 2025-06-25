@@ -363,7 +363,7 @@ def check(output, encrypt=None, verbose=1, init=False, _intern={}):
     if not _intern:
         _intern['goldenref']=output
         if verbose>2:
-            print("FI: record golden ref")
+            print("FI: record golden ref", output.hex())
         return (FaultStatus.NoFault, None)
     if output == _intern['goldenref']:
         if verbose>2:
