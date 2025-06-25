@@ -394,7 +394,7 @@ def check(output, encrypt=None, verbose=1, init=False, _intern={}):
             print("FI: too much impact (%2i)" % diffsum)
         return (FaultStatus.MajorFault, None)
 
-def crack_file(r9_filename, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1):
+def crack_file(r9_filename, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1, onlysolve=False):
     """
     Tries to crack a round key given faulty outputs glitched on round 9 and stored in a file
 
@@ -403,6 +403,7 @@ def crack_file(r9_filename, lastroundkeys=[], encrypt=True, outputbeforelastroun
     :param encrypt: True if encryption, False if decryption.
     :param outputbeforelastrounds:
     :param verbose: verbosity level
+    :param onlysolve: collect statistics regarding solutions, rather than looking for an intersection
     :returns: cracked round key as hexstring or None
     """
     ref=None
@@ -426,9 +427,9 @@ def crack_file(r9_filename, lastroundkeys=[], encrypt=True, outputbeforelastroun
                 r9faults.append(o)
         else:
             continue
-    return crack_bytes(r9faults, ref, lastroundkeys=lastroundkeys, encrypt=encrypt, outputbeforelastrounds=outputbeforelastrounds, verbose=verbose)
+    return crack_bytes(r9faults, ref, lastroundkeys=lastroundkeys, encrypt=encrypt, outputbeforelastrounds=outputbeforelastrounds, verbose=verbose, onlysolve=onlysolve)
 
-def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1):
+def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastrounds=False, verbose=1, onlysolve=False):
     """
     Tries to crack a round key given faulty outputs glitched on round 9
 
@@ -438,9 +439,16 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
     :param encrypt: True if encryption, False if decryption.
     :param outputbeforelastrounds:
     :param verbose: verbosity level
+    :param onlysolve: collect statistics regarding solutions, rather than looking for an intersection
     :returns: cracked round key as hexstring or None
     """
     candidates=[[], [], [], []]
+    if onlysolve:
+        # Counters for each solution occurrence
+        occurrences=[[0 for _ in range(256)] for __ in range(16)]
+    else:
+        # Empty list evaluates to False
+        occurrences=[]
     recovered=[False, False, False, False]
     key=[None]*16
     if not outputbeforelastrounds:
@@ -455,8 +463,9 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
         if index is not None:
             if recovered[index]:
                 continue
-            _absorb(index, o, candidates, ref, encrypt, verbose)
+            _absorb(index, o, candidates, ref, encrypt, verbose, occurrences=occurrences)
             c = candidates
+            # When only solving equations, the condition below will evaluate to false as there will never be just just a singleton
             if len(c[index])==1 and len(c[index][0][0])==1 and len(c[index][0][1])==1 and len(c[index][0][2])==1 and len(c[index][0][3])==1:
                 recovered[index]=True
                 Keys=[k for k, y in zip (range(16), _AesFaultMaps[encrypt][index]) if y]
@@ -491,30 +500,41 @@ def crack_bytes(r9faults, ref, lastroundkeys=[], encrypt=True, outputbeforelastr
             return roundkey
     if True in recovered:
         return ''.join(["%02X" % x if x is not None else ".." for x in key])
+    elif onlysolve:
+        # Return counters
+        return occurrences
     else:
         return None
 
-def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose):
+def _absorb(index, o, candidates, goldenrefbytes, encrypt, verbose, occurrences=[]):
     Diff=[x^g for x, g, y in zip (o, goldenrefbytes, _AesFaultMaps[encrypt][index]) if y]
     Keys=[  k for    k, y in zip (        range(16), _AesFaultMaps[encrypt][index]) if y]
     Cands  = _get_cands(Diff, Keys, goldenrefbytes, [[14, 9,  13, 11], [2, 3, 1, 1]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, goldenrefbytes, [[11, 14, 9,  13], [3, 1, 1, 2]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, goldenrefbytes, [[13, 11, 14, 9] , [1, 1, 2, 3]][encrypt], encrypt, verbose)
     Cands += _get_cands(Diff, Keys, goldenrefbytes, [[9,  13, 11, 14], [1, 2, 3, 1]][encrypt], encrypt, verbose)
-    if not candidates[index]:
+    if occurrences:
         candidates[index] = Cands
+        for cand in Cands:
+            for idx, vals in zip(Keys, cand):
+                for val in vals:
+                    # Increment corresponding counter
+                    occurrences[idx][val^goldenrefbytes[idx]] += 1
     else:
-        # merge self.candidates[index] and Cands
-        new_candidates=[]
-        for lc0,lc1,lc2,lc3 in Cands:
-            for loc0,loc1,loc2,loc3 in candidates[index]:
-                if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
-                    new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
-        # candidates[index]=new_candidates
-        if new_candidates != []:
-            candidates[index]=new_candidates
+        if not candidates[index]:
+            candidates[index] = Cands
         else:
-            candidates[index] += Cands
+            # merge self.candidates[index] and Cands
+            new_candidates=[]
+            for lc0,lc1,lc2,lc3 in Cands:
+                for loc0,loc1,loc2,loc3 in candidates[index]:
+                    if (lc0 & loc0) and (lc1 & loc1) and (lc2 & loc2) and (lc3 & loc3):
+                        new_candidates.append(((lc0 & loc0), (lc1 & loc1), (lc2 & loc2), (lc3 & loc3)))
+            # candidates[index]=new_candidates
+            if new_candidates != []:
+                candidates[index]=new_candidates
+            else:
+                candidates[index] += Cands
 
 def _get_cands(Diff, Keys, Gold, tmult, encrypt, verbose):
     candi = [_get_compat(di, ti, encrypt) for di,ti in zip(Diff, tmult)]
